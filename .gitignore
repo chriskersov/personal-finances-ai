@@ -1,0 +1,13 @@
+# Excel files — NEVER commit these
+finances.xlsx
+finances.xlsm
+finances.xls
+
+# Python
+venv/
+__pycache__/
+*.pyc
+.env
+
+# Mac
+.DS_Store
