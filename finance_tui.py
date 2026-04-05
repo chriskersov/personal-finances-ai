@@ -9,6 +9,7 @@ from textual.app import App, ComposeResult
 from textual.containers import ScrollableContainer, Horizontal, Vertical
 from textual.widgets import Footer, Static, Button, ListView, ListItem, Label
 from textual.worker import Worker, WorkerState
+from textual_plotext import PlotextPlot
 
 # ── Config ───────────────────────────────────────────────────────────────────
 MODEL = "qwen2.5:7b"
@@ -270,7 +271,7 @@ class FinanceApp(App):
         border: solid #2b3330;
         border-left: tall #5fffb0;
         padding: 1 2;
-        margin: 1 2 1 2;
+        margin: 1 2 0 2;
         height: auto;
         color: #d6d2c8;
     }
@@ -280,11 +281,27 @@ class FinanceApp(App):
         text-style: italic;
     }
 
+    #digest-box.error-box {
+        background: #180f0f;
+        border: solid #3a1a1a;
+        border-left: tall #ff5f5f;
+        color: #ff9a9a;
+    }
+
+    #chart {
+        height: 20;
+        margin: 1 2 0 2;
+        border: solid #2b3330;
+        border-left: tall #5fffb0;
+        background: #101112;
+    }
+
     #regen {
         background: #171c1a;
         color: #5fffb0;
         border: solid #2b3330;
         margin-left: 2;
+        margin-top: 1;
         margin-bottom: 1;
     }
 
@@ -304,13 +321,6 @@ class FinanceApp(App):
         background: #171c1a;
         color: #5fffb0;
     }
-
-    #digest-box.error-box {
-        background: #180f0f;
-        border: solid #3a1a1a;
-        border-left: tall #ff5f5f;
-        color: #ff9a9a;
-    }
     """
 
     def __init__(self):
@@ -328,10 +338,14 @@ class FinanceApp(App):
             with ScrollableContainer(id="main"):
                 yield Static("", id="selected-month")
                 yield Static("Select a month to begin…", id="digest-box")
+                yield PlotextPlot(id="chart")
                 yield Button("↻  REGENERATE", id="regen")
         yield Footer()
 
     def on_mount(self) -> None:
+        # Hide chart until data loads
+        self.query_one("#chart").display = False
+
         if not os.path.exists(EXCEL_PATH):
             self._show_error(
                 f"Excel file not found at: {EXCEL_PATH}\n\n"
@@ -345,7 +359,6 @@ class FinanceApp(App):
         all_sheets = wb.sheetnames
         wb.close()
 
-        # Only include sheets matching "Month Year" format
         self._sheet_names = [n for n in all_sheets if MONTH_SHEET_RE.match(n)]
 
         now = datetime.now()
@@ -360,7 +373,6 @@ class FinanceApp(App):
                 item.add_class("current-month")
             list_view.append(item)
 
-        # Highlight current month in sidebar but don't auto-run
         list_view.index = next(
             (i for i, n in enumerate(self._sheet_names)
              if current_month_str.lower() in n.lower()),
@@ -376,6 +388,32 @@ class FinanceApp(App):
         for item in self.query("#sheet-list ListItem"):
             item.remove_class("selected-month")
         selected_item.add_class("selected-month")
+
+    def _update_chart(self, categories: list) -> None:
+        active = [cat for cat in categories if cat["total"] not in (None, 0)]
+        active = sorted(active, key=lambda x: float(x["total"] or 0), reverse=True)
+
+        chart_widget = self.query_one("#chart", PlotextPlot)
+
+        if not active:
+            chart_widget.display = False
+            return
+
+        plt = chart_widget.plt
+        plt.clear_figure()
+        plt.theme("dark")
+
+        labels = [cat["category"] for cat in active]
+        needs_vals  = [float(cat["needs"]  or 0) for cat in active]
+        wants_vals  = [float(cat["wants"]  or 0) for cat in active]
+
+        plt.stacked_bar(labels, [needs_vals, wants_vals], labels=["Needs", "Wants"], color=["green", "cyan"])
+        plt.title("Spend by Category")
+        plt.xlabel("")
+        plt.yfrequency(4)
+
+        chart_widget.display = True
+        chart_widget.refresh()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         sheet_name = event.item.name or ""
@@ -394,25 +432,29 @@ class FinanceApp(App):
         box.update("Reading your finances…")
         box.add_class("loading")
         self.query_one("#regen", Button).disabled = True
+        self.query_one("#chart").display = False
         self.run_worker(
             lambda: self._worker_logic(sheet),
             thread=True,
             exclusive=True,
         )
 
-    def _worker_logic(self, sheet: str) -> str:
+    def _worker_logic(self, sheet: str) -> dict:
         data = load_sheet(EXCEL_PATH, sheet)
         context = build_context(sheet, data)
-        return generate_digest(context, sheet)
+        digest = generate_digest(context, sheet)
+        return {"digest": digest, "categories": data["categories"]}
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         box = self.query_one("#digest-box", Static)
         btn = self.query_one("#regen", Button)
 
         if event.state == WorkerState.SUCCESS:
+            result = event.worker.result
             box.remove_class("loading")
-            box.update(event.worker.result)
+            box.update(result["digest"])
             btn.disabled = False
+            self._update_chart(result["categories"])
 
         elif event.state == WorkerState.ERROR:
             box.remove_class("loading")
