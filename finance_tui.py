@@ -1,17 +1,24 @@
 import os
+import re
 import ollama
 from datetime import datetime
 from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string as col_idx
 
 from textual.app import App, ComposeResult
-from textual.containers import ScrollableContainer
-from textual.widgets import Header, Footer, Static, Button
+from textual.containers import ScrollableContainer, Horizontal, Vertical
+from textual.widgets import Footer, Static, Button, ListView, ListItem, Label
 from textual.worker import Worker, WorkerState
 
 # ── Config ───────────────────────────────────────────────────────────────────
 MODEL = "qwen2.5:7b"
 EXCEL_PATH = os.environ.get("FINANCE_FILE", "finances.xlsm")
+
+# Only show sheets that match "Month Year" e.g. "April 2025"
+MONTH_SHEET_RE = re.compile(
+    r"^(January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"\s+\d{4}$"
+)
 
 # ── Pure Logic ────────────────────────────────────────────────────────────────
 def c(ws, col_letter, row):
@@ -35,7 +42,6 @@ def load_sheet(path, sheet_name):
     wb = load_workbook(path, data_only=True)
     ws = wb[sheet_name]
 
-    # ── Needs (B21:E100, data starts row 24)
     needs = []
     for r in range(24, 101):
         desc, date, cat, actual = c(ws,'B',r), c(ws,'C',r), c(ws,'D',r), c(ws,'E',r)
@@ -43,7 +49,6 @@ def load_sheet(path, sheet_name):
             needs.append({"description": desc, "date": str(date)[:10] if date else None,
                           "category": cat, "actual": actual})
 
-    # ── Wants (G21:J100, data starts row 24)
     wants = []
     for r in range(24, 101):
         desc, date, cat, actual = c(ws,'G',r), c(ws,'H',r), c(ws,'I',r), c(ws,'J',r)
@@ -51,7 +56,6 @@ def load_sheet(path, sheet_name):
             wants.append({"description": desc, "date": str(date)[:10] if date else None,
                           "category": cat, "actual": actual})
 
-    # ── Savings (L21:O100, data starts row 24)
     savings = []
     for r in range(24, 101):
         desc, date, cat, actual = c(ws,'L',r), c(ws,'M',r), c(ws,'N',r), c(ws,'O',r)
@@ -59,7 +63,6 @@ def load_sheet(path, sheet_name):
             savings.append({"description": desc, "date": str(date)[:10] if date else None,
                             "category": cat, "actual": actual})
 
-    # ── Cash Flow (Q43:W46)
     cash_flow = {}
     for row, label in [(43,"needs"),(44,"wants"),(45,"savings"),(46,"total")]:
         cash_flow[label] = {
@@ -68,7 +71,6 @@ def load_sheet(path, sheet_name):
             "diff": c(ws,'W',row),
         }
 
-    # ── Budget goals vs actual (Q51:V53)
     goals = {}
     for row, label in [(51,"needs"),(52,"wants"),(53,"savings")]:
         goals[label] = {
@@ -76,7 +78,6 @@ def load_sheet(path, sheet_name):
             "actual": c(ws,'V',row),
         }
 
-    # ── Income (Q58:V100)
     income = []
     for r in range(58, 101):
         desc, date, actual = c(ws,'Q',r), c(ws,'T',r), c(ws,'V',r)
@@ -85,7 +86,6 @@ def load_sheet(path, sheet_name):
                            "date": str(date)[:10] if date else None,
                            "actual": actual})
 
-    # ── Categories (AA53:AE66)
     categories = []
     for r in range(53, 67):
         name = c(ws,'AA',r)
@@ -99,13 +99,9 @@ def load_sheet(path, sheet_name):
             })
 
     return {
-        "needs": needs,
-        "wants": wants,
-        "savings": savings,
-        "cash_flow": cash_flow,
-        "goals": goals,
-        "income": income,
-        "categories": categories,
+        "needs": needs, "wants": wants, "savings": savings,
+        "cash_flow": cash_flow, "goals": goals,
+        "income": income, "categories": categories,
     }
 
 
@@ -114,19 +110,16 @@ def build_context(sheet_name, d):
     lines.append(f"MONTH: {sheet_name}")
     lines.append(f"Data read on: {datetime.now().strftime('%d %B %Y')}\n")
 
-    # Cash flow
     cf = d["cash_flow"]
     lines.append("CASH FLOW:")
     for label in ["needs","wants","savings","total"]:
         v = cf[label]
         lines.append(f"  {label.capitalize():8s} — In: {fmt(v['in'])}  Out: {fmt(v['out'])}  Difference: {fmt(v['diff'])}")
 
-    # Goals
     lines.append("\nBUDGET GOALS vs ACTUAL:")
     for label, v in d["goals"].items():
         lines.append(f"  {label.capitalize():8s} — Goal: {fmt_pct(v['goal'])}  Actual: {fmt_pct(v['actual'])}")
 
-    # Income
     if d["income"]:
         lines.append(f"\nINCOME ({len(d['income'])} entries):")
         for e in d["income"]:
@@ -134,7 +127,6 @@ def build_context(sheet_name, d):
     else:
         lines.append("\nINCOME: none recorded yet")
 
-    # Needs
     if d["needs"]:
         total = sum(float(e["actual"]) for e in d["needs"])
         lines.append(f"\nNEEDS SPENDING — {len(d['needs'])} entries, total {fmt(total)}:")
@@ -143,7 +135,6 @@ def build_context(sheet_name, d):
     else:
         lines.append("\nNEEDS SPENDING: none recorded yet")
 
-    # Wants
     if d["wants"]:
         total = sum(float(e["actual"]) for e in d["wants"])
         lines.append(f"\nWANTS SPENDING — {len(d['wants'])} entries, total {fmt(total)}:")
@@ -152,7 +143,6 @@ def build_context(sheet_name, d):
     else:
         lines.append("\nWANTS SPENDING: none recorded yet")
 
-    # Savings
     if d["savings"]:
         total = sum(float(e["actual"]) for e in d["savings"])
         lines.append(f"\nSAVINGS — {len(d['savings'])} entries, total {fmt(total)}:")
@@ -161,7 +151,6 @@ def build_context(sheet_name, d):
     else:
         lines.append("\nSAVINGS: none recorded yet")
 
-    # Categories
     active_cats = [cat for cat in d["categories"] if cat["total"] not in (None, 0)]
     if active_cats:
         lines.append(f"\nSPEND BY CATEGORY:")
@@ -204,7 +193,7 @@ Write as a plain paragraph. No bullet points. Calm, direct tone like a smart fin
 # ── TUI Application ──────────────────────────────────────────────────────────
 class FinanceApp(App):
     CSS = """
-    Screen { background: #0e0e0e; color: #e8e4dc; }
+    Screen { background: #101112; color: #e8e4dc; }
 
     #title {
         color: #5fffb0;
@@ -212,25 +201,78 @@ class FinanceApp(App):
         margin: 1 0 0 2;
     }
 
-    #month {
-        margin: 0 0 0 2;
+    #divider {
+        color: #2b3330;
+        margin: 0 2;
+    }
+
+    #content-row {
+        margin: 0 2;
+        height: 1fr;
+    }
+
+    #sidebar {
+        width: 24;
+        border-right: solid #2b3330;
+        padding: 0 1 0 0;
+    }
+
+    #sidebar-title {
+        color: #5fffb0;
+        text-style: bold;
+        margin: 1 0 1 0;
+    }
+
+    ListView {
+        background: #101112;
+        border: none;
+        padding: 0;
+    }
+
+    ListItem {
+        background: #101112;
+        color: #6f736f;
+        padding: 0 2;
+    }
+
+    ListItem:hover {
+        background: #1a1f1d;
+        color: #d6d2c8;
+    }
+
+    ListItem.-highlight {
+        background: #1d2421;
+        color: #5fffb0;
+    }
+
+    ListItem.current-month {
+        color: #c8c4bc;
+    }
+
+    ListItem.selected-month {
+        background: #1d2421;
+        color: #5fffb0;
+        text-style: bold;
+    }
+
+    #main {
+        padding: 0;
+    }
+
+    #selected-month {
+        margin: 1 0 0 2;
         text-style: bold;
         color: #e8e4dc;
     }
 
-    #divider {
-        color: #1e3d2e;
-        margin: 0 2;
-    }
-
     #digest-box {
-        background: #0e0e0e;
-        border: solid #1e3d2e;
+        background: #101112;
+        border: solid #2b3330;
         border-left: tall #5fffb0;
         padding: 1 2;
         margin: 1 2 1 2;
         height: auto;
-        color: #c8c4bc;
+        color: #d6d2c8;
     }
 
     #digest-box.loading {
@@ -239,48 +281,54 @@ class FinanceApp(App):
     }
 
     #regen {
-        background: #0e1a14;
+        background: #171c1a;
         color: #5fffb0;
-        border: solid #1e3d2e;
+        border: solid #2b3330;
         margin-left: 2;
         margin-bottom: 1;
     }
 
     #regen:hover {
-        background: #1a3d28;
+        background: #24302b;
         color: #5fffb0;
         border: solid #5fffb0;
     }
 
     #regen:disabled {
-        background: #0e0e0e;
-        color: #2a4a38;
-        border: solid #1a2a20;
+        background: #101112;
+        color: #435049;
+        border: solid #222826;
     }
 
     Footer {
-        background: #0e1a14;
-        color: #2a6644;
+        background: #171c1a;
+        color: #5fffb0;
     }
 
-    #error-box {
+    #digest-box.error-box {
         background: #180f0f;
         border: solid #3a1a1a;
         border-left: tall #ff5f5f;
-        padding: 1 2;
-        margin: 1 2 1 2;
-        height: auto;
         color: #ff9a9a;
     }
     """
 
+    def __init__(self):
+        super().__init__()
+        self._sheet_names: list[str] = []
+        self._selected_sheet: str = ""
+
     def compose(self) -> ComposeResult:
         yield Static("FINANCE AI", id="title")
-        yield Static(datetime.now().strftime("%B %Y"), id="month")
         yield Static("─" * 80, id="divider")
-        with ScrollableContainer():
-            yield Static("Reading your finances…", id="digest-box", classes="loading")
-            yield Button("↻  REGENERATE", id="regen")
+        with Horizontal(id="content-row"):
+            with Vertical(id="sidebar"):
+                yield Static("MONTHS", id="sidebar-title")
+                yield ListView(id="sheet-list")
+            with ScrollableContainer(id="main"):
+                yield Static("", id="selected-month")
+                yield Static("Select a month to begin…", id="digest-box")
+                yield Button("↻  REGENERATE", id="regen")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -290,31 +338,72 @@ class FinanceApp(App):
                 f"Set the path with:\n  export FINANCE_FILE=/full/path/to/your/file.xlsm"
             )
             return
-        self._run_digest()
+        self._load_sheets()
+
+    def _load_sheets(self) -> None:
+        wb = load_workbook(EXCEL_PATH, read_only=True)
+        all_sheets = wb.sheetnames
+        wb.close()
+
+        # Only include sheets matching "Month Year" format
+        self._sheet_names = [n for n in all_sheets if MONTH_SHEET_RE.match(n)]
+
+        now = datetime.now()
+        current_month_str = now.strftime("%B %Y")
+
+        list_view = self.query_one("#sheet-list", ListView)
+
+        for name in self._sheet_names:
+            is_current = current_month_str.lower() in name.lower()
+            item = ListItem(Label(name), name=name)
+            if is_current:
+                item.add_class("current-month")
+            list_view.append(item)
+
+        # Highlight current month in sidebar but don't auto-run
+        list_view.index = next(
+            (i for i, n in enumerate(self._sheet_names)
+             if current_month_str.lower() in n.lower()),
+            0
+        )
+
+        if list_view.children:
+            current_item = list_view.children[list_view.index]
+            if isinstance(current_item, ListItem):
+                self._set_selected_item_class(current_item)
+
+    def _set_selected_item_class(self, selected_item: ListItem) -> None:
+        for item in self.query("#sheet-list ListItem"):
+            item.remove_class("selected-month")
+        selected_item.add_class("selected-month")
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        sheet_name = event.item.name or ""
+        if sheet_name in self._sheet_names:
+            self._set_selected_item_class(event.item)
+            self._selected_sheet = sheet_name
+            self.query_one("#selected-month", Static).update(sheet_name)
+            self._run_digest()
 
     def _run_digest(self) -> None:
+        if not self._selected_sheet:
+            return
+        sheet = self._selected_sheet
         box = self.query_one("#digest-box", Static)
+        box.remove_class("error-box")
         box.update("Reading your finances…")
         box.add_class("loading")
         self.query_one("#regen", Button).disabled = True
-        self.run_worker(self._worker_logic, thread=True, exclusive=True)
-
-    def _worker_logic(self) -> str:
-        now = datetime.now()
-
-        wb = load_workbook(EXCEL_PATH, read_only=True)
-        sheet_names = wb.sheetnames
-        wb.close()
-
-        current_month_str = now.strftime("%B %Y")
-        sheet_name = next(
-            (s for s in sheet_names if current_month_str.lower() in s.lower()),
-            sheet_names[-1]
+        self.run_worker(
+            lambda: self._worker_logic(sheet),
+            thread=True,
+            exclusive=True,
         )
 
-        data = load_sheet(EXCEL_PATH, sheet_name)
-        context = build_context(sheet_name, data)
-        return generate_digest(context, sheet_name)
+    def _worker_logic(self, sheet: str) -> str:
+        data = load_sheet(EXCEL_PATH, sheet)
+        context = build_context(sheet, data)
+        return generate_digest(context, sheet)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         box = self.query_one("#digest-box", Static)
@@ -327,7 +416,8 @@ class FinanceApp(App):
 
         elif event.state == WorkerState.ERROR:
             box.remove_class("loading")
-            self._show_error(f"Error: {event.worker.error}")
+            box.add_class("error-box")
+            box.update(f"Error: {event.worker.error}")
             btn.disabled = False
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
